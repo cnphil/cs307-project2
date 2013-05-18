@@ -15,7 +15,7 @@ typedef pair<int,int> InterruptType;
 #define IDLE "Idle process and some random redundancy J&UHDSUX(AC())"
 #define EOP "END OF PROGRAM"
 #define SOP "START OF PROGRAM"
-#define ERR printf("VirtualError");
+#define ERR printf("VirtualError\n");
 int globalQuantum = 200;
 int globalContextSwitch = 50;
 int globalPages = 100;
@@ -23,9 +23,11 @@ int globalPages = 100;
 
 typedef string Interrupt;
 #define TimerMsg() ("")
-#define DiskMsg(processName) (processName)
+#define DiskMsg(pageName) (pageName)
 #define ProcessCreationMsg(processName) (processName)
 #define msgParseProcessName(msg) (msg)
+#define msgParsePageName(msg) (msg)
+
 
 class SchedulerBase
 {
@@ -33,6 +35,7 @@ public:
 	virtual bool handleInterrupts(int time, string currentProcess) {ERR}
 	virtual void processTermination(int time, string currentProcess) {ERR}
 	virtual void pageFault(int time, string faultingProcess, string faultingPage) {ERR}
+	virtual void diskInterrupt(int time, string processName) {ERR}
 };
 
 class CPUBase
@@ -56,13 +59,19 @@ class ProcessInfo
 class Scheduler : SchedulerBase
 {
 	map<InterruptType, Interrupt> interrupts;
-	deque<string> faultQueue, readyQueue;
+	deque<string> faultQueue, readyQueue, blockedQueue;
+	map<string, string> blockedPage; // maps a process to a page
 	map<string, ProcessInfo> infoTable;
 	
 	CPUBase *cpu;
 	MemoryBase *memory;
 
 public:
+	void diskInterrupt(int time, string pageName)
+	{
+		interrupts[DiskInterrupt(time)] = pageName;
+	}
+	
 	bool handleInterrupts(int time, string currentProcess)
 	{
 		if(interrupts.size() == 0) return false;
@@ -77,7 +86,25 @@ public:
 		// handle Disk then
 		if(interrupts.find(DiskInterrupt(time)) != interrupts.end()) {
 			// add it to the fault queue
-			faultQueue.push_back(msgParseProcessName(interrupts[DiskInterrupt(time)]));
+			string faultingPage = msgParsePageName(interrupts[DiskInterrupt(time)]);
+			
+			for(deque<string>::iterator iter = blockedQueue.begin(); iter != blockedQueue.end(); )
+				if(blockedPage[(*iter)] == faultingPage) {
+					string faultingProcess = (*iter);
+					faultQueue.push_back(faultingProcess);
+					
+					blockedPage.erase(blockedPage.find(faultingProcess));
+					if((iter + 1) != blockedQueue.end()) {
+						string nextProcess = (*(iter + 1));
+						blockedQueue.erase(iter);
+						iter = blockedQueue.find(nextProcess);
+					} else {
+						blockedQueue.erase(iter);
+						break;
+					}
+				} else {
+					iter++;
+				}
 			
 			interrupts.erase(interrupts.find(DiskInterrupt(time)));
 		}
@@ -175,6 +202,8 @@ public:
 		}
 		
 		memory->swapPage(time, faultingProcess, faultingPage);
+		blockedQueue.push_back(faultingProcess);
+		blockedPage[faultingProcess] = faultingPage;
 		cpu->notifyContextSwitch(IDLE, time);
 	}
 	
@@ -261,13 +290,13 @@ class CPU : CPUBase
 	}
 };
 
-typedef pair<string,int> swappingInfo;
+// typedef pair<string,int> swappingInfo;
 
 class MemoryModel
 {
 public:
 	virtual bool accessPage(int time, string pageName) {ERR}
-	virtual bool insertPage(int time, string pageName) {ERR}
+	virtual bool insertPage(int availTime, string pageName) {ERR} // always use this after kickOut
 	virtual void markBusy(string pageName) {ERR}
 	virtual void unmarkBusy(string pageName) {ERR}
 	virtual bool kickOut() {ERR}
@@ -277,31 +306,75 @@ public:
 class FIFOMemory : MemoryModel
 {
 	deque<string> pages;
-	deque<string> markedPages;
+	map<string, bool> pageMarked;
+	map<string, int> pageAvailTime;
 public:
 	bool accessPage(int time, string pageName)
 	{
-		return pages.find(pageName) != pages.end();
+		if(pages.find(pageName) == pages.end()) {
+			return false;
+		} else if(map[pageName] > time) {
+			return false;
+		}
+		return true;
 	}
-	void insertPage(int time, string pageName)
+	bool memoryFull()
 	{
-		pages
+		return (pages.size() == globalPages);
+	}
+	bool insertPage(int availTime, string pageName)
+	{
+		pages.push_back(pageName);
+		pageAvailTime[pageName] = availTime;
+		pageMarked[pageName] = false;
+		return true;
 	}
 	void markBusy(string pageName)
 	{
-		
+		pageMarked[pageName] = true;
 	}
 	void unmarkBusy(string pageName)
 	{
-		
+		pageMarked[pageName] = false;
 	}
 	bool kickOut()
 	{
-		
+		if(!this->memoryFull()) return false;
+		deque<string>::iterator iter = pages.begin();
+		while(pageMarked[(*iter)]) {
+			iter++;
+			if(iter == pages.end()) {
+				// not expected
+			}
+		}
+		string kickout = (*iter);
+		pages.erase(iter);
+		pageMarked.erase(pageMarked.find(kickout));
+		pageAvailTime.erase(pageAvailTime.find(kickout));
 	}	
 };
+
 class Memory : MemoryBase
 {
-	map<string, swappingInfo> awaitingPages;
+	map<string, int> awaitingTime;
+	deque<string> awaitingPages;
+	MemoryModel *mmu;
+	SchedulerBase *scheduler;
+	int busyUntil; // should be -1 at first
 	
+public:
+	void updateAwaitingPages()
+	{
+		
+	}
+	bool fetch(int time, int processName, int pageName)
+	{
+		this->updateAwaitingPages();
+		return mmu->accessPage(time, pageName);
+	}
+	void swapPage(int time, string faultingProcess, string faultingPage)
+	{
+		this->updateAwaitingPages();
+		awaitingPages
+	}
 };
