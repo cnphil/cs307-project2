@@ -2,6 +2,7 @@
 #include <queue>
 #include <vector>
 #include <string>
+#include <set>
 #include <map>
 #include <fstream>
 #include <deque>
@@ -14,16 +15,18 @@ typedef pair<int,int> InterruptType;
 #define DiskInterrupt(t) make_pair(t,2)
 #define ProcessCreationInterrupt(t) make_pair(t,3)
 #define IDLE "IDLE_PROCESS"
+#define NOBUFFER "NO_BUFFER"
 #define EOP "END OF PROGRAM"
 #define SOP "START OF PROGRAM"
 #define ERR printf("VirtualError\n");
 #define quantumLeft first
 #define nextTimer second
-int globalQuantum = 3;
+int globalQuantum = 1000;
 int globalContextSwitch = 50;
-int globalPages = 100;
+int globalPages = 75;
 int globalSwap = 1000;
-int globalCyclesPerSec = 1;
+int globalCyclesPerSec = 100000;
+bool debugEnable = false;
 
 
 typedef string Interrupt;
@@ -46,6 +49,10 @@ public:
 	virtual void diskInterrupt(int time, string pageName) {ERR}
 	virtual void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m) {ERR}
 	virtual void creationInterrupt(int time, string processName) {ERR}
+	virtual int closestInterruptTime() {ERR}
+	
+	virtual void debug() {ERR}
+	virtual void debugCheck(string page) {ERR}
 };
 
 class CPUBase
@@ -55,6 +62,7 @@ public:
 	virtual void simulate() {ERR}
 	virtual void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m) {ERR}
 	virtual void creationInterrupt(int time, string processName) {ERR}
+	virtual void pageFaultIncrease(string process) {ERR}
 };
 
 class MemoryBase
@@ -63,6 +71,9 @@ public:
 	virtual void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m, MemoryModel *model) {ERR}
 	virtual bool fetch(int time, string processName, string pageName) {ERR}
 	virtual void swapPage(int time, string faultingProcess, string faultingPage) {ERR}
+	virtual void pageArrival(string page) {ERR}
+	
+	virtual void debug() {ERR}
 };
 
 /*class ProcessInfo
@@ -71,12 +82,20 @@ public:
 	int quantumLeft;
 	int nextTimer;
 };*/
+
+void perror(string msg)
+{
+	cout << endl << msg << endl;
+	exit(0);
+}
+
 typedef pair<int,int> ProcessInfo;
 
 class Scheduler : SchedulerBase
 {
 	map<InterruptType, Interrupt> interrupts;
-	deque<string> faultQueue, readyQueue, blockedQueue;
+	deque<string> faultQueue, readyQueue;
+	set<string> blockedQueue;
 	map<string, string> blockedPage; // maps a process to a page
 	map<string, ProcessInfo> infoTable;
 	
@@ -84,6 +103,34 @@ class Scheduler : SchedulerBase
 	MemoryBase *memory;
 
 public:
+	int closestInterruptTime()
+	{
+		if(interrupts.begin() == interrupts.end()) return -1;
+		return (interrupts.begin()->first).first;
+	}
+	void debugCheck(string page)
+	{
+		for(set<string>::iterator iter = blockedQueue.begin(); iter != blockedQueue.end(); iter++) {
+			if(blockedPage[(*iter)] == page) {
+				perror("Gun");
+			}
+		}
+		
+	}
+	
+	void debug()
+	{
+		cout << "!! faultQueue: ";
+		for(deque<string>::iterator iter = faultQueue.begin(); iter != faultQueue.end(); iter++) cout << (*iter) << " ";
+		cout << endl;
+		cout << "!! readyQueue: ";
+		for(deque<string>::iterator iter = readyQueue.begin(); iter != readyQueue.end(); iter++) cout << (*iter) << " ";
+		cout << endl;
+		cout << "!! blockedQueue: ";
+		for(set<string>::iterator iter = blockedQueue.begin(); iter != blockedQueue.end(); iter++) cout << (*iter) << "(" << blockedPage[*iter]  << ") ";
+		cout << endl;
+		
+	}
 	void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m)
 	{
 		cpu = c;
@@ -92,6 +139,8 @@ public:
 	
 	void creationInterrupt(int time, string processName)
 	{
+		if(debugEnable)cout << "! Interrupt Creation: " << ProcessCreationMsg(processName) << " @ " << time << endl;
+		while(interrupts.find(ProcessCreationInterrupt(time)) != interrupts.end()) time++;
 		interrupts[ProcessCreationInterrupt(time)] = ProcessCreationMsg(processName);
 	}
 	
@@ -102,11 +151,14 @@ public:
 	
 	bool handleInterrupts(int time, string currentProcess)
 	{
-		if(interrupts.size() == 0) return false;
+		if(debugEnable)cout << "Cycle: " << time << " interrupts " << interrupts.size() << endl;
+		
+		if(interrupts.size() == 0 && faultQueue.size() + readyQueue.size() + blockedQueue.size() == 0) return false;
 		
 		// handle ProcessCreation first
 		if(interrupts.find(ProcessCreationInterrupt(time)) != interrupts.end()) {
 			// add it to the ready queue
+			if(debugEnable)cout << "! Creation:"  << interrupts[ProcessCreationInterrupt(time)] << endl;
 			readyQueue.push_back(msgParseProcessName(interrupts[ProcessCreationInterrupt(time)]));
 			infoTable[(msgParseProcessName(interrupts[ProcessCreationInterrupt(time)]))] = make_pair(globalQuantum, 0);
 			
@@ -117,23 +169,27 @@ public:
 			// add it to the fault queue
 			string faultingPage = msgParsePageName(interrupts[DiskInterrupt(time)]);
 			
-			for(deque<string>::iterator iter = blockedQueue.begin(); iter != blockedQueue.end(); )
+			for(set<string>::iterator iter = blockedQueue.begin(); iter != blockedQueue.end(); )
 				if(blockedPage[(*iter)] == faultingPage) {
 					string faultingProcess = (*iter);
 					faultQueue.push_back(faultingProcess);
 					
 					blockedPage.erase(blockedPage.find(faultingProcess));
-					if((iter + 1) != blockedQueue.end()) {
-						deque<string>::iterator tmp = iter + 1;
-						blockedQueue.erase(iter);
-						iter = tmp;
+					set<string>::iterator titer = iter;
+					++iter;
+					if(iter != blockedQueue.end()) {
+						string tmp = *iter;
+						blockedQueue.erase(titer);
+						iter = blockedQueue.find(tmp);
 					} else {
-						blockedQueue.erase(iter);
+						blockedQueue.erase(titer);
 						break;
 					}
 				} else {
 					iter++;
 				}
+			
+			memory->pageArrival(faultingPage);
 			
 			interrupts.erase(interrupts.find(DiskInterrupt(time)));
 		}
@@ -168,12 +224,15 @@ public:
 				}
 				
 				int estTimer = time + globalContextSwitch + infoTable[nextProcess].quantumLeft;
+				if(debugEnable)cout<<"quantumLeft:"<<infoTable[nextProcess].quantumLeft<<endl;
 				if(infoTable[nextProcess].quantumLeft == 0) {
 					// this is not expected
+					perror("quantum");
 				} else {
 					infoTable[nextProcess].nextTimer = estTimer;
 					interrupts[TimerInterrupt(estTimer)] = TimerMsg();
 				}
+				if(debugEnable)cout<<"nextTimer:"<<estTimer<<endl;
 				cpu->notifyContextSwitch(nextProcess, time + globalContextSwitch);
 			}
 			
@@ -187,8 +246,6 @@ public:
 	
 	void processTermination(int time, string currentProcess)
 	{
-		cout << "! " << currentProcess << " terminated at " << time << endl;
-		
 		// revoke currentProcess's timer
 		int estTimer = infoTable[currentProcess].nextTimer;
 		if(interrupts.find(TimerInterrupt(estTimer)) != interrupts.end()) {
@@ -201,7 +258,7 @@ public:
 	
 	void pageFault(int time, string faultingProcess, string faultingPage)
 	{
-		cout << "! " << "Fault starts for " << faultingProcess << "\n";
+		if(debugEnable)cout << "! " << "Fault starts for " << faultingProcess << "\n";
 		
 		// IMPORTANT: we tell the memory to run a page replacement algorithm here
 		// SO, if the faultingProcess is at the end of its quantum
@@ -219,29 +276,35 @@ public:
 			return;
 		}
 		
+		if(debugEnable)cout << "Runnable passed\n";
 		// else
-		
+		cpu->pageFaultIncrease(faultingProcess);
 		// update quantumLeft
 		if(infoTable[faultingProcess].nextTimer == time) {
 			// revoke its timer
+			if(debugEnable)cout<<"starts1\n";
 			interrupts.erase(interrupts.find(TimerInterrupt(time)));
+			if(debugEnable)cout<<"interrupt erase done \n";
 			// renew its quantum
 			infoTable[faultingProcess].quantumLeft = globalQuantum;
 		} else {
 			// revoke its timer
+			if(debugEnable)cout<<"starts2"<<time<<" " << infoTable[faultingProcess].nextTimer<< "\n";
 			interrupts.erase(interrupts.find(TimerInterrupt(infoTable[faultingProcess].nextTimer)));
+			if(debugEnable)cout<<"interrupt erase done 2\n";
 			// renew its quantum
-			infoTable[faultingProcess].quantumLeft = time - infoTable[faultingProcess].nextTimer;
+			infoTable[faultingProcess].quantumLeft = infoTable[faultingProcess].nextTimer - time;
 		}
 		
-		cout << "! " << faultingProcess << " kicked by page fault " << faultingPage << " at " << time << endl;
+		if(debugEnable)cout << "! " << faultingProcess << " kicked by page fault " << faultingPage << " at " << time << endl;
 		
 		memory->swapPage(time, faultingProcess, faultingPage);
-		blockedQueue.push_back(faultingProcess);
+		blockedQueue.insert(faultingProcess);
+		
 		blockedPage[faultingProcess] = faultingPage;
 		cpu->notifyContextSwitch(IDLE, time);
 		
-		cout << "! " << "Fault ends\n";
+		if(debugEnable)cout << "! " << "Fault ends\n";
 	}
 	
 };
@@ -251,10 +314,35 @@ class CPU : CPUBase
 	SchedulerBase *scheduler;
 	MemoryBase *memory;
 	map<string, ifstream*> fd; // file descripters
+	map<string, string> reverseBuffer;
+	map<string, int> cycleCount, pageFaultCount, terminationTime;
 	int time, currentProcessStartTime;
+	int idleCycles;
 	string currentProcess, nextMem;
 	
+	bool readBuffer(string processName)
+	{
+		if(reverseBuffer.find(processName) == reverseBuffer.end() || reverseBuffer[processName] == NOBUFFER)
+		{
+			ifstream *thisFd = fd[processName];
+			return ((*thisFd) >> nextMem);
+		}
+		nextMem = reverseBuffer[processName];
+		reverseBuffer[processName] = NOBUFFER;
+		return true;
+	}
+	
 public:
+	void cycleCountIncrease(string process)
+	{
+		++cycleCount[process];
+	}
+	
+	void pageFaultIncrease(string process)
+	{
+		++pageFaultCount[process];
+	}
+	
 	void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m)
 	{
 		scheduler = s;
@@ -262,12 +350,11 @@ public:
 	}
 	void notifyContextSwitch(string newProcess, int newProcessStartTime)
 	{	
-		cout << "! " << "Context switch: " << currentProcess << " -> " << newProcess << " to be started at " << newProcessStartTime << endl;
+		if(debugEnable)cout << "! " << "Context switch: " << currentProcess << " -> " << newProcess << " to be started at " << newProcessStartTime << endl;
 			
 		if(nextMem != SOP && nextMem != EOP && currentProcess != IDLE) {
-			// nextMem not executed, repos the fd back
-			ifstream *thisFd = fd[currentProcess];
-			thisFd->seekg(-nextMem.length());
+			// nextMem not executed, restore nextMem to buffer
+			reverseBuffer[currentProcess] = nextMem;
 		}
 		
 		
@@ -278,9 +365,9 @@ public:
 	
 	void simulate()
 	{
-		time = 0; currentProcessStartTime = 0; currentProcess = IDLE;
+		time = -1; currentProcessStartTime = -1; currentProcess = IDLE; idleCycles = 0;
 		do {
-			cout << "Start of cycle " << time + 1 << endl;
+			if(debugEnable)cout << "Start of cycle " << time + 1 << " : " << currentProcess << endl;
 			// start of a cycle
 			// handle interrupts
 			if(!(scheduler->handleInterrupts(++time, currentProcess)) && currentProcess == IDLE) {
@@ -289,59 +376,86 @@ public:
 			}
 			
 			// check who is running now
-			if(currentProcess == IDLE) continue;
+			if(currentProcess == IDLE) {
+				// magic jump
+				if(scheduler->closestInterruptTime() - 1 > time) {
+					idleCycles += scheduler->closestInterruptTime() - time;
+					time = scheduler->closestInterruptTime() - 1;
+					continue;
+				}
+				++idleCycles; continue;
+			}
 			// check if currentProcess is on a context switch
-			if(currentProcessStartTime > time) continue;
+			if(currentProcessStartTime > time) {++idleCycles; continue;}
 			
 			// new process?
 			if(fd.find(currentProcess) == fd.end()) {
 				ifstream *newFd = new ifstream;
 				string targetFile = currentProcess + ".mem";
 				newFd->open(targetFile.c_str());
-				cout << targetFile << " opened\n";
+				if(debugEnable)cout << targetFile << " opened\n";
 				fd[currentProcess] = newFd;
 				nextMem = SOP;
 			}
 			
 			// do this cycle
-			bool thisCycleDone = true;
+			
 			if(nextMem == SOP) {
 				// do nothing
 			} else {
 				// do this cycle
+				this->cycleCountIncrease(currentProcess);
 			}
 			
 			
 			// handling next mem ref
-			ifstream *thisFd = fd[currentProcess];
-			cout << "Going to read\n";
-			if(!((*thisFd) >> nextMem)) {
+			if(debugEnable)cout << "Going to read\n";
+			if(!this->readBuffer(currentProcess)) {
 				// end of program
 				nextMem = EOP;
 				
 				// switch to idle
+				cout << "!! " << currentProcess << " terminated at " << time  << " with total cycles: " << cycleCount[currentProcess] << " and page faults: " << pageFaultCount[currentProcess] << endl;
+				terminationTime[currentProcess] = time;
 				scheduler->processTermination(time, currentProcess);
 			
 			} else {
-				cout << "Read " << nextMem << endl;
+				if(debugEnable)cout << "Read " << nextMem << endl;
 				// not end of program
 				// query memory
 				bool inMem = memory->fetch(time, currentProcess, nextMem);
-				cout << "Mem fetch " << inMem << " \n";
+				
+				if(debugEnable)cout << "Mem fetch " << inMem << " " << currentProcess << " : "<< cycleCount[currentProcess] << " \n";
+				if(cycleCount[currentProcess] % 10000 == 0) {
+					cout << "!!Mem fetch " << inMem << " " << currentProcess << " : "<< cycleCount[currentProcess] << " \n";
+					scheduler->debug();
+					// memory->debug();
+					//if(currentProcess == "P8" && cycleCount[currentProcess] == 115100) debugEnable = true;
+				}
+					
+					
 				if(inMem) { // nextMem in memory
 					// pretending page fetched
 					
 				} else { //nextMem not in memory
 					// notify scheduler
 					// disk swapping actually happens here
-					cout << "! " << "Starting to call pageFault at " << time + 1 << " for " << currentProcess << " and " << nextMem << endl;
-					scheduler->pageFault(time + 1, currentProcess, nextMem);
-					cout << "! " << "Finished pageFault\n";
+					if(debugEnable)cout << "! " << "Starting to call pageFault at " << time << " for " << currentProcess << " and " << nextMem << endl;
+					scheduler->pageFault(time, currentProcess, nextMem);
+					if(debugEnable)cout << "! " << "Finished pageFault\n";
 				}
 			}
-			cout << "! " << "Cycle " << time << " complete\n";
+			if(debugEnable)cout << "" << "Cycle " << time << " complete\n";
 			
 		} while(1);
+		cout << "!! Simulation finished at cycle " << time << " with total idle time: " << idleCycles << endl;
+		cout << "!! To conclude:\n";
+		int totalPageFaults = 0;
+		for(map<string,int>::iterator iter = terminationTime.begin(); iter != terminationTime.end(); iter++) {
+			cout << "!! " << iter->first << " terminated at " << iter->second << ", ran " << cycleCount[iter->first] << " cycles with " << pageFaultCount[iter->first] << " page faults.\n";
+			totalPageFaults += pageFaultCount[iter->first]; 
+		}
+		cout << "!! Total page faults: " << totalPageFaults << endl;
 	}
 };
 
@@ -400,6 +514,7 @@ public:
 			iter++;
 			if(iter == pages.end()) {
 				// not expected
+				perror("kickout");
 			}
 		}
 		string kickout = (*iter);
@@ -414,7 +529,6 @@ class Memory : MemoryBase
 {
 	map<string, int> awaitingTime;
 	map<string, string> lastFaultProcess;
-	deque<string> awaitingPages;
 	MemoryModel *mmu;
 	SchedulerBase *scheduler;
 	int busyUntil; // should be -1 at first
@@ -426,38 +540,40 @@ public:
 		busyUntil = -1;
 		mmu = model;
 	}
-	void updateAwaitingPages(int time)
+	
+	void debug()
 	{
-		deque<string>::iterator iter;
-		while(iter = awaitingPages.begin(), (iter != awaitingPages.end() && awaitingTime[*iter] <= time)) {
-			awaitingTime.erase(awaitingTime.find(*iter));
-			awaitingPages.pop_front();
-		}
+		for(map<string,int>::iterator iter = awaitingTime.begin(); iter != awaitingTime.end(); iter++)
+			cout << "!! Awaiting page: " << iter->first << " to be available at " << iter->second << endl;
+	}
+	
+	void pageArrival(string page)
+	{
+		awaitingTime.erase(awaitingTime.find(page));
 	}
 	bool fetch(int time, string processName, string pageName)
 	{
-		cout << "Going to fetch " << pageName << "\n";
-		this->updateAwaitingPages(time);
-		cout << "Done updateAwaitingPages\n";
+		if(debugEnable)cout << "Going to fetch " << pageName << "\n";
+		//this->updateAwaitingPages(time);
+		if(debugEnable)cout << "Done updateAwaitingPages\n";
 		if(lastFaultProcess.find(pageName) != lastFaultProcess.end()) {
 			if(lastFaultProcess[pageName] == processName) {
 				mmu->unmarkBusy(pageName);
 				lastFaultProcess.erase(lastFaultProcess.find(pageName));
 			}
 		}
-		cout << "Done lastFault check\n";
+		if(debugEnable)cout << "Done lastFault check\n";
 		return mmu->accessPage(time, pageName);
 	}
 	void swapPage(int time, string faultingProcess, string faultingPage)
 	{
-		this->updateAwaitingPages(time);
+		//this->updateAwaitingPages(time);
 		lastFaultProcess[faultingPage] = faultingProcess;
 		if(awaitingTime.find(faultingPage) != awaitingTime.end()) {
 			// already on a transfer
 			// nothing to do
 		} else {
 			int ETA = max(time, busyUntil) + globalSwap;
-			awaitingPages.push_back(faultingPage);
 			awaitingTime[faultingPage] = ETA;
 			
 			busyUntil = ETA;
