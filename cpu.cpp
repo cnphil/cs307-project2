@@ -5,6 +5,7 @@
 #include <map>
 #include <fstream>
 #include <deque>
+#include <cmath>
 using namespace std;
 
 typedef pair<int,int> InterruptType;
@@ -19,6 +20,7 @@ typedef pair<int,int> InterruptType;
 int globalQuantum = 200;
 int globalContextSwitch = 50;
 int globalPages = 100;
+int globalSwap = 1000;
 
 
 typedef string Interrupt;
@@ -351,30 +353,58 @@ public:
 		pages.erase(iter);
 		pageMarked.erase(pageMarked.find(kickout));
 		pageAvailTime.erase(pageAvailTime.find(kickout));
+		return true;
 	}	
 };
 
 class Memory : MemoryBase
 {
 	map<string, int> awaitingTime;
+	map<string, string> lastFaultProcess;
 	deque<string> awaitingPages;
 	MemoryModel *mmu;
 	SchedulerBase *scheduler;
 	int busyUntil; // should be -1 at first
 	
 public:
-	void updateAwaitingPages()
+	void updateAwaitingPages(int time)
 	{
-		
+		deque<string> iter;
+		while(iter = awaitingPages.begin(), (iter != awaitingPages.end() && awaitingTime[*iter] <= time)) {
+			awaitingTime.erase(awaitingTime.find(*iter));
+			awaitingPages.pop_front();
+		}
 	}
 	bool fetch(int time, int processName, int pageName)
 	{
-		this->updateAwaitingPages();
+		this->updateAwaitingPages(time);
+		if(lastFaultProcess.find(pageName) != lastFaultProcess.end()) {
+			if(lastFetchProcess[pageName] == processName) {
+				mmu->unmarkBusy(pageName);
+				lastFetchProcess.erase(lastFetchProcess.find(pageName));
+			}
+		}
 		return mmu->accessPage(time, pageName);
 	}
 	void swapPage(int time, string faultingProcess, string faultingPage)
 	{
-		this->updateAwaitingPages();
-		awaitingPages
+		this->updateAwaitingPages(time);
+		lastFaultProcess[faultingPage] = faultingProcess;
+		if(awaitingPages.find(faultingPage) != awaitingPages.end()) {
+			// already on a transfer
+			// nothing to do
+		} else {
+			int ETA = max(time, busyUntil) + globalSwap;
+			awaitingPages.push_back(faultingPage);
+			awaitingTime[faultingPage] = ETA;
+			
+			busyUntil = ETA;
+			
+			mmu->kickOut();
+			mmu->insertPage(ETA, faultingPage);
+			mmu->markBusy(faultingPage);
+			
+			
+		}
 	}
 };
