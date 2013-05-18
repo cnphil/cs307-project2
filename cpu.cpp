@@ -21,6 +21,7 @@ int globalQuantum = 200;
 int globalContextSwitch = 50;
 int globalPages = 100;
 int globalSwap = 1000;
+int globalCyclePerSec = 100000;
 
 
 typedef string Interrupt;
@@ -30,6 +31,8 @@ typedef string Interrupt;
 #define msgParseProcessName(msg) (msg)
 #define msgParsePageName(msg) (msg)
 
+class CPUBase;
+class MemoryBase;
 
 class SchedulerBase
 {
@@ -37,7 +40,8 @@ public:
 	virtual bool handleInterrupts(int time, string currentProcess) {ERR}
 	virtual void processTermination(int time, string currentProcess) {ERR}
 	virtual void pageFault(int time, string faultingProcess, string faultingPage) {ERR}
-	virtual void diskInterrupt(int time, string processName) {ERR}
+	virtual void diskInterrupt(int time, string pageName) {ERR}
+	virtual void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m) {ERR}
 };
 
 class CPUBase
@@ -45,15 +49,20 @@ class CPUBase
 public:
 	virtual void notifyContextSwitch(string newProcess, int newProcessStartTime) {ERR}
 	virtual void simulate() {ERR}
+	virtual void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m) {ERR}
 };
 
 class MemoryBase
 {
 public:
+	virtual void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m) {ERR}
+	virtual bool fetch(int time, string processName, string pageName) {ERR}
+	virtual void swapPage(int time, string faultingProcess, string faultingPage) {ERR}
 };
 
 class ProcessInfo
 {
+public:
 	int quantumLeft;
 	int nextTimer;
 };
@@ -69,6 +78,14 @@ class Scheduler : SchedulerBase
 	MemoryBase *memory;
 
 public:
+	void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m)
+	{
+		cpu = c;
+		memory = m;
+	}
+	
+	
+	
 	void diskInterrupt(int time, string pageName)
 	{
 		interrupts[DiskInterrupt(time)] = pageName;
@@ -97,9 +114,9 @@ public:
 					
 					blockedPage.erase(blockedPage.find(faultingProcess));
 					if((iter + 1) != blockedQueue.end()) {
-						string nextProcess = (*(iter + 1));
+						deque<string>::iterator tmp = iter + 1;
 						blockedQueue.erase(iter);
-						iter = blockedQueue.find(nextProcess);
+						iter = tmp;
 					} else {
 						blockedQueue.erase(iter);
 						break;
@@ -219,6 +236,12 @@ class CPU : CPUBase
 	int time, currentProcessStartTime;
 	string currentProcess, nextMem;
 	
+public:
+	void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m)
+	{
+		scheduler = s;
+		memory = m;
+	}
 	void notifyContextSwitch(string newProcess, int newProcessStartTime)
 	{		
 		if(nextMem != SOP && nextMem != EOP && currentProcess != IDLE) {
@@ -251,7 +274,8 @@ class CPU : CPUBase
 			// new process?
 			if(fd.find(currentProcess) == fd.end()) {
 				ifstream *newFd = new ifstream;
-				newFd->open(currentProcess + ".mem");
+				string targetFile = currentProcess + ".mem";
+				newFd->open(targetFile.c_str());
 				fd[currentProcess] = newFd;
 				nextMem = SOP;
 			}
@@ -272,7 +296,7 @@ class CPU : CPUBase
 				nextMem = EOP;
 				
 				// switch to idle
-				Scheduler->processTermination(time, currentProcess);
+				scheduler->processTermination(time, currentProcess);
 			
 			} else {
 				// not end of program
@@ -313,9 +337,9 @@ class FIFOMemory : MemoryModel
 public:
 	bool accessPage(int time, string pageName)
 	{
-		if(pages.find(pageName) == pages.end()) {
+		if(pageAvailTime.find(pageName) == pageAvailTime.end()) {
 			return false;
-		} else if(map[pageName] > time) {
+		} else if(pageAvailTime[pageName] > time) {
 			return false;
 		}
 		return true;
@@ -367,21 +391,25 @@ class Memory : MemoryBase
 	int busyUntil; // should be -1 at first
 	
 public:
+	void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m)
+	{
+		scheduler = s;
+	}
 	void updateAwaitingPages(int time)
 	{
-		deque<string> iter;
+		deque<string>::iterator iter;
 		while(iter = awaitingPages.begin(), (iter != awaitingPages.end() && awaitingTime[*iter] <= time)) {
 			awaitingTime.erase(awaitingTime.find(*iter));
 			awaitingPages.pop_front();
 		}
 	}
-	bool fetch(int time, int processName, int pageName)
+	bool fetch(int time, string processName, string pageName)
 	{
 		this->updateAwaitingPages(time);
 		if(lastFaultProcess.find(pageName) != lastFaultProcess.end()) {
-			if(lastFetchProcess[pageName] == processName) {
+			if(lastFaultProcess[pageName] == processName) {
 				mmu->unmarkBusy(pageName);
-				lastFetchProcess.erase(lastFetchProcess.find(pageName));
+				lastFaultProcess.erase(lastFaultProcess.find(pageName));
 			}
 		}
 		return mmu->accessPage(time, pageName);
@@ -390,7 +418,7 @@ public:
 	{
 		this->updateAwaitingPages(time);
 		lastFaultProcess[faultingPage] = faultingProcess;
-		if(awaitingPages.find(faultingPage) != awaitingPages.end()) {
+		if(awaitingTime.find(faultingPage) != awaitingTime.end()) {
 			// already on a transfer
 			// nothing to do
 		} else {
@@ -404,7 +432,21 @@ public:
 			mmu->insertPage(ETA, faultingPage);
 			mmu->markBusy(faultingPage);
 			
-			
+			scheduler->diskInterrupt(ETA, faultingPage);
 		}
 	}
 };
+
+int main()
+{
+	CPUBase *myCPU = (CPUBase *)(new CPU);
+	MemoryBase *myMemory = (MemoryBase *)(new Memory);
+	SchedulerBase *myScheduler = (SchedulerBase *)(new Scheduler);
+	
+	myScheduler->initialize(myScheduler, myCPU, myMemory);
+	myCPU->initialize(myScheduler, myCPU, myMemory);
+	myMemory->initialize(myScheduler, myCPU, myMemory);
+	
+	myCPU->simulate();
+	
+}
