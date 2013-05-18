@@ -15,8 +15,11 @@ typedef pair<int,int> InterruptType;
 #define IDLE "Idle process and some random redundancy J&UHDSUX(AC())"
 #define EOP "END OF PROGRAM"
 #define SOP "START OF PROGRAM"
+#define ERR printf("VirtualError");
 int globalQuantum = 200;
 int globalContextSwitch = 50;
+int globalPages = 100;
+
 
 typedef string Interrupt;
 #define TimerMsg() ("")
@@ -24,23 +27,46 @@ typedef string Interrupt;
 #define ProcessCreationMsg(processName) (processName)
 #define msgParseProcessName(msg) (msg)
 
+class SchedulerBase
+{
+public:
+	virtual bool handleInterrupts(int time, string currentProcess) {ERR}
+	virtual void processTermination(int time, string currentProcess) {ERR}
+	virtual void pageFault(int time, string faultingProcess, string faultingPage) {ERR}
+};
+
+class CPUBase
+{
+public:
+	virtual void notifyContextSwitch(string newProcess, int newProcessStartTime) {ERR}
+	virtual void simulate() {ERR}
+};
+
+class MemoryBase
+{
+public:
+};
+
 class ProcessInfo
 {
 	int quantumLeft;
 	int nextTimer;
 };
 
-class Scheduler
+class Scheduler : SchedulerBase
 {
 	map<InterruptType, Interrupt> interrupts;
 	deque<string> faultQueue, readyQueue;
 	map<string, ProcessInfo> infoTable;
 	
-	CPU *cpu;
-	Memory *memory;
-	
-	void handleInterrupts(int time, string currentProcess)
+	CPUBase *cpu;
+	MemoryBase *memory;
+
+public:
+	bool handleInterrupts(int time, string currentProcess)
 	{
+		if(interrupts.size() == 0) return false;
+		
 		// handle ProcessCreation first
 		if(interrupts.find(ProcessCreationInterrupt(time)) != interrupts.end()) {
 			// add it to the ready queue
@@ -99,6 +125,8 @@ class Scheduler
 			if(interrupts.find(TimerInterrupt(time)) != interrupts.end())
 				interrupts.erase(interrupts.find(TimerInterrupt(time)));
 		}
+		
+		return true;
 	}
 	
 	void processTermination(int time, string currentProcess)
@@ -152,10 +180,10 @@ class Scheduler
 	
 };
 
-class CPU
+class CPU : CPUBase
 {
-	Scheduler *scheduler;
-	Memory *memory;
+	SchedulerBase *scheduler;
+	MemoryBase *memory;
 	map<string, ifstream*> fd; // file descripters
 	int time, currentProcessStartTime;
 	string currentProcess, nextMem;
@@ -179,7 +207,10 @@ class CPU
 		do {
 			// start of a cycle
 			// handle interrupts
-			Scheduler->handleInterrupts(++time, currentProcess);
+			if(!(scheduler->handleInterrupts(++time, currentProcess)) && currentProcess == IDLE) {
+				// simulation finished
+				break;
+			}
 			
 			// check who is running now
 			if(currentProcess == IDLE) continue;
@@ -215,17 +246,62 @@ class CPU
 			} else {
 				// not end of program
 				// query memory
-				if(Memory->fetch(time, currentProcess, nextMem)) { // nextMem in memory
+				if(memory->fetch(time, currentProcess, nextMem)) { // nextMem in memory
 					// pretending page fetched
 					
 				} else { //nextMem not in memory
 					// notify scheduler
 					// disk swapping actually happens here
-					Scheduler->pageFault(time + 1, currentProcess, nextMem);
+					scheduler->pageFault(time + 1, currentProcess, nextMem);
 				}
 			}
 			
 			
 		} while(1);
 	}
+};
+
+typedef pair<string,int> swappingInfo;
+
+class MemoryModel
+{
+public:
+	virtual bool accessPage(int time, string pageName) {ERR}
+	virtual bool insertPage(int time, string pageName) {ERR}
+	virtual void markBusy(string pageName) {ERR}
+	virtual void unmarkBusy(string pageName) {ERR}
+	virtual bool kickOut() {ERR}
+	virtual bool memoryFull() {ERR}
+};
+
+class FIFOMemory : MemoryModel
+{
+	deque<string> pages;
+	deque<string> markedPages;
+public:
+	bool accessPage(int time, string pageName)
+	{
+		return pages.find(pageName) != pages.end();
+	}
+	void insertPage(int time, string pageName)
+	{
+		pages
+	}
+	void markBusy(string pageName)
+	{
+		
+	}
+	void unmarkBusy(string pageName)
+	{
+		
+	}
+	bool kickOut()
+	{
+		
+	}	
+};
+class Memory : MemoryBase
+{
+	map<string, swappingInfo> awaitingPages;
+	
 };
