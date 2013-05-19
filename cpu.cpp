@@ -722,6 +722,7 @@ int main(int argc, char *argv[])
 	
 	if(argv[3] == FIFO) myModel = (MemoryModel *)(new FIFOMemory);
 	else if(argv[3] == LRU) myModel = (MemoryModel *)(new LRUMemory);
+	else if(argv[3] == SCA) myModel = (MemoryModel *)(new SCAMemory);
 	
 	myScheduler->initialize(myScheduler, myCPU, myMemory);
 	myCPU->initialize(myScheduler, myCPU, myMemory);
