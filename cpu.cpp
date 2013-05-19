@@ -471,7 +471,7 @@ public:
 	virtual bool insertPage(int availTime, string pageName) {ERR} // always use this after kickOut
 	virtual void markBusy(string pageName) {ERR}
 	virtual void unmarkBusy(string pageName) {ERR}
-	virtual bool kickOut() {ERR}
+	virtual bool kickOut(int time) {ERR}
 	virtual bool memoryFull() {ERR}
 };
 
@@ -509,11 +509,11 @@ public:
 	{
 		pageMarked[pageName] = false;
 	}
-	bool kickOut()
+	bool kickOut(int time)
 	{
 		if(!this->memoryFull()) return false;
 		deque<string>::iterator iter = pages.begin();
-		while(pageMarked[(*iter)]) {
+		while(pageMarked[(*iter)] || pageAvailTime[(*iter)] > time) {
 			iter++;
 			if(iter == pages.end()) {
 				// not expected
@@ -572,11 +572,11 @@ public:
 	{
 		pageMarked[pageName] = false;
 	}
-	bool kickOut()
+	bool kickOut(int time)
 	{
 		if(!this->memoryFull()) return false;
 		set<reverseAccessType>::iterator iter = reverseAccess.begin();
-		while(pageMarked[iter->second]) {
+		while(pageMarked[iter->second] || pageAvailTime[iter->second] > time) {
 			iter++;
 			if(iter == reverseAccess.end()) {
 				// not expected
@@ -586,6 +586,62 @@ public:
 		string kickout = iter->second;
 		reverseAccess.erase(iter);
 		pageAccessTime.erase(kickout);
+		pageMarked.erase(pageMarked.find(kickout));
+		pageAvailTime.erase(pageAvailTime.find(kickout));
+		return true;
+	}	
+};
+
+class SCAMemory : MemoryModel
+{
+	deque<string> pages;
+	map<string, bool> pageMarked, pageRef;
+	map<string, int> pageAvailTime;
+public:
+	bool accessPage(int time, string pageName)
+	{		
+		if(pageAvailTime.find(pageName) == pageAvailTime.end()) {
+			return false;
+		} else if(pageAvailTime[pageName] > time) {
+			return false;
+		}
+		pageRef[pageName] = true;
+		return true;
+	}
+	bool memoryFull()
+	{
+		return (pages.size() == globalPages);
+	}
+	bool insertPage(int availTime, string pageName)
+	{
+		pages.push_back(pageName);
+		pageAvailTime[pageName] = availTime;
+		pageMarked[pageName] = false;
+		pageRef[pageName] = true;
+		return true;
+	}
+	void markBusy(string pageName)
+	{
+		pageMarked[pageName] = true;
+	}
+	void unmarkBusy(string pageName)
+	{
+		pageMarked[pageName] = false;
+	}
+	bool kickOut(int time)
+	{
+		if(!this->memoryFull()) return false;
+		deque<string>::iterator iter = pages.begin();
+		while(pageMarked[(*iter)] || pageAvailTime[(*iter)] > time || pageRef[(*iter)]) {
+			if(!(pageMarked[(*iter)] || pageAvailTime[(*iter)] > time)) pageRef[(*iter)] = false;
+			iter++;
+			if(iter == pages.end()) {
+				iter = pages.begin();
+			}
+		}
+		string kickout = (*iter);
+		pages.erase(iter);
+		pageRef.erase(pageRef.find(kickout));
 		pageMarked.erase(pageMarked.find(kickout));
 		pageAvailTime.erase(pageAvailTime.find(kickout));
 		return true;
@@ -645,7 +701,7 @@ public:
 			
 			busyUntil = ETA;
 			
-			mmu->kickOut();
+			mmu->kickOut(time);
 			mmu->insertPage(ETA, faultingPage);
 			mmu->markBusy(faultingPage);
 			
