@@ -26,6 +26,9 @@ int globalContextSwitch = 50;
 int globalPages = 75;
 int globalSwap = 1000;
 int globalCyclesPerSec = 100000;
+string FIFO = "fifo";
+string LRU = "lru";
+string SCA = "2ch-alg";
 bool debugEnable = false;
 
 
@@ -282,16 +285,16 @@ public:
 		// update quantumLeft
 		if(infoTable[faultingProcess].nextTimer == time) {
 			// revoke its timer
-			if(debugEnable)cout<<"starts1\n";
+			if(debugEnable)cout<<"faulting case 1\n";
 			interrupts.erase(interrupts.find(TimerInterrupt(time)));
-			if(debugEnable)cout<<"interrupt erase done \n";
+			if(debugEnable)cout<<"erase done\n";
 			// renew its quantum
 			infoTable[faultingProcess].quantumLeft = globalQuantum;
 		} else {
 			// revoke its timer
-			if(debugEnable)cout<<"starts2"<<time<<" " << infoTable[faultingProcess].nextTimer<< "\n";
+			if(debugEnable)cout<<"faulting case 2"<<time<<" " << infoTable[faultingProcess].nextTimer<< "\n";
 			interrupts.erase(interrupts.find(TimerInterrupt(infoTable[faultingProcess].nextTimer)));
-			if(debugEnable)cout<<"interrupt erase done 2\n";
+			if(debugEnable)cout<<"erase done\n";
 			// renew its quantum
 			infoTable[faultingProcess].quantumLeft = infoTable[faultingProcess].nextTimer - time;
 		}
@@ -304,7 +307,7 @@ public:
 		blockedPage[faultingProcess] = faultingPage;
 		cpu->notifyContextSwitch(IDLE, time);
 		
-		if(debugEnable)cout << "! " << "Fault ends\n";
+		if(debugEnable)cout << "! " << "pageFault ends\n";
 	}
 	
 };
@@ -514,11 +517,75 @@ public:
 			iter++;
 			if(iter == pages.end()) {
 				// not expected
-				perror("kickout");
+				perror("memory kick out reached end of deque");
 			}
 		}
 		string kickout = (*iter);
 		pages.erase(iter);
+		pageMarked.erase(pageMarked.find(kickout));
+		pageAvailTime.erase(pageAvailTime.find(kickout));
+		return true;
+	}	
+};
+
+typedef pair<int,string> reverseAccessType;
+#define reverseAccessElement(x,y) make_pair((x),(y))
+class LRUMemory : MemoryModel
+{
+	map<string, bool> pageMarked;
+	map<string, int> pageAvailTime, pageAccessTime;
+	set<reverseAccessType> reverseAccess;
+public:
+	bool accessPage(int time, string pageName)
+	{		
+		if(pageAvailTime.find(pageName) == pageAvailTime.end()) {
+			return false;
+		} else if(pageAvailTime[pageName] > time) {
+			return false;
+		}
+		
+		if(pageAccessTime[pageName] < time) {
+			reverseAccess.erase(reverseAccess.find(reverseAccessElement(pageAccessTime[pageName], pageName)));
+			reverseAccess.insert(reverseAccessElement(time, pageName));
+			pageAccessTime[pageName] = time;
+		}
+		
+		return true;
+	}
+	bool memoryFull()
+	{
+		return (reverseAccess.size() == globalPages);
+	}
+	bool insertPage(int availTime, string pageName)
+	{
+		pageAvailTime[pageName] = availTime;
+		pageMarked[pageName] = false;
+		pageAccessTime[pageName] = availTime;
+		reverseAccess.insert(reverseAccessElement(availTime, pageName));
+		return true;
+	}
+	void markBusy(string pageName)
+	{
+		pageMarked[pageName] = true;
+	}
+	void unmarkBusy(string pageName)
+	{
+		pageMarked[pageName] = false;
+	}
+	bool kickOut()
+	{
+		if(!this->memoryFull()) return false;
+		set<reverseAccessType>::iterator iter = reverseAccess.begin();
+		while(pageMarked[iter->second]) {
+			iter++;
+			if(iter == reverseAccess.end()) {
+				// not expected
+				perror("kick out reached the end of set");
+			}
+		}
+		string kickout = iter->second;
+		reverseAccess.erase(iter);
+		pageAccessTime.erase(kickout);
 		pageMarked.erase(pageMarked.find(kickout));
 		pageAvailTime.erase(pageAvailTime.find(kickout));
 		return true;
@@ -587,12 +654,18 @@ public:
 	}
 };
 
-int main()
+int main(int argc, char *argv[])
 {
+	freopen(argv[4], "r", stdin);
+	globalPages = atoi(argv[1]);
+	globalQuantum = atoi(argv[2]);
 	CPUBase *myCPU = (CPUBase *)(new CPU);
 	MemoryBase *myMemory = (MemoryBase *)(new Memory);
 	SchedulerBase *myScheduler = (SchedulerBase *)(new Scheduler);
-	MemoryModel *myModel = (MemoryModel *)(new FIFOMemory);
+	MemoryModel *myModel;
+	
+	if(argv[3] == FIFO) myModel = (MemoryModel *)(new FIFOMemory);
+	else if(argv[3] == LRU) myModel = (MemoryModel *)(new LRUMemory);
 	
 	myScheduler->initialize(myScheduler, myCPU, myMemory);
 	myCPU->initialize(myScheduler, myCPU, myMemory);
