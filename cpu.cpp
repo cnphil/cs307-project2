@@ -634,10 +634,9 @@ public:
 		deque<string>::iterator iter = pages.begin();
 		while(pageMarked[(*iter)] || pageAvailTime[(*iter)] > time || pageRef[(*iter)]) {
 			if(!(pageMarked[(*iter)] || pageAvailTime[(*iter)] > time)) pageRef[(*iter)] = false;
-			iter++;
-			if(iter == pages.end()) {
-				iter = pages.begin();
-			}
+			pages.push_back(*iter);
+			pages.erase(iter);
+			iter = pages.begin();
 		}
 		string kickout = (*iter);
 		pages.erase(iter);
