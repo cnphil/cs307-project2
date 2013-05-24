@@ -328,7 +328,9 @@ class CPU : CPUBase
 		if(reverseBuffer.find(processName) == reverseBuffer.end() || reverseBuffer[processName] == NOBUFFER)
 		{
 			ifstream *thisFd = fd[processName];
-			return ((*thisFd) >> nextMem);
+			bool ret = ((*thisFd) >> nextMem);
+			nextMem += "b" + processName;
+			return ret;
 		}
 		nextMem = reverseBuffer[processName];
 		reverseBuffer[processName] = NOBUFFER;
