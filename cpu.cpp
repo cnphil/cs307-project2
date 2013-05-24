@@ -7,10 +7,13 @@
 #include <fstream>
 #include <deque>
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 using namespace std;
 
-typedef pair<int,int> InterruptType;
+typedef pair<long long,int> InterruptType;
 
+#define maxLL(x,y) (((x)>(y))?(x):(y))
 #define TimerInterrupt(t) make_pair(t,1)
 #define DiskInterrupt(t) make_pair(t,2)
 #define ProcessCreationInterrupt(t) make_pair(t,3)
@@ -29,6 +32,7 @@ int globalCyclesPerSec = 100000;
 string FIFO = "fifo";
 string LRU = "lru";
 string SCA = "2ch-alg";
+map<string, double> processStartTime;
 bool debugEnable = false;
 
 
@@ -46,13 +50,13 @@ class MemoryModel;
 class SchedulerBase
 {
 public:
-	virtual bool handleInterrupts(int time, string currentProcess) {ERR}
-	virtual void processTermination(int time, string currentProcess) {ERR}
-	virtual void pageFault(int time, string faultingProcess, string faultingPage) {ERR}
-	virtual void diskInterrupt(int time, string pageName) {ERR}
+	virtual bool handleInterrupts(long long time, string currentProcess) {ERR}
+	virtual void processTermination(long long time, string currentProcess) {ERR}
+	virtual void pageFault(long long time, string faultingProcess, string faultingPage) {ERR}
+	virtual void diskInterrupt(long long time, string pageName) {ERR}
 	virtual void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m) {ERR}
-	virtual void creationInterrupt(int time, string processName) {ERR}
-	virtual int closestInterruptTime() {ERR}
+	virtual void creationInterrupt(long long time, string processName) {ERR}
+	virtual long long closestInterruptTime() {ERR}
 	
 	virtual void debug() {ERR}
 	virtual void debugCheck(string page) {ERR}
@@ -61,10 +65,10 @@ public:
 class CPUBase
 {
 public:
-	virtual void notifyContextSwitch(string newProcess, int newProcessStartTime) {ERR}
+	virtual void notifyContextSwitch(string newProcess, long long newProcessStartTime) {ERR}
 	virtual void simulate() {ERR}
 	virtual void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m) {ERR}
-	virtual void creationInterrupt(int time, string processName) {ERR}
+	virtual void creationInterrupt(long long time, string processName) {ERR}
 	virtual void pageFaultIncrease(string process) {ERR}
 };
 
@@ -72,8 +76,8 @@ class MemoryBase
 {
 public:
 	virtual void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m, MemoryModel *model) {ERR}
-	virtual bool fetch(int time, string processName, string pageName) {ERR}
-	virtual void swapPage(int time, string faultingProcess, string faultingPage) {ERR}
+	virtual bool fetch(long long time, string processName, string pageName) {ERR}
+	virtual bool swapPage(long long time, string faultingProcess, string faultingPage) {ERR}
 	virtual void pageArrival(string page) {ERR}
 	
 	virtual void debug() {ERR}
@@ -92,12 +96,12 @@ void perror(string msg)
 	exit(0);
 }
 
-typedef pair<int,int> ProcessInfo;
+typedef pair<int,long long> ProcessInfo;
 
 class Scheduler : SchedulerBase
 {
 	map<InterruptType, Interrupt> interrupts;
-	deque<string> faultQueue, readyQueue;
+	deque<string> faultQueue, readyQueue, hangedQueue, hangedPage;
 	set<string> blockedQueue;
 	map<string, string> blockedPage; // maps a process to a page
 	map<string, ProcessInfo> infoTable;
@@ -106,7 +110,7 @@ class Scheduler : SchedulerBase
 	MemoryBase *memory;
 
 public:
-	int closestInterruptTime()
+	long long closestInterruptTime()
 	{
 		if(interrupts.begin() == interrupts.end()) return -1;
 		return (interrupts.begin()->first).first;
@@ -132,6 +136,9 @@ public:
 		cout << "!! blockedQueue: ";
 		for(set<string>::iterator iter = blockedQueue.begin(); iter != blockedQueue.end(); iter++) cout << (*iter) << "(" << blockedPage[*iter]  << ") ";
 		cout << endl;
+		cout << "!! hangedQueue: ";
+		for(deque<string>::iterator iter = hangedQueue.begin(); iter != hangedQueue.end(); iter++) cout << (*iter) << " ";
+		cout << endl;
 		
 	}
 	void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m)
@@ -140,23 +147,23 @@ public:
 		memory = m;
 	}
 	
-	void creationInterrupt(int time, string processName)
+	void creationInterrupt(long long time, string processName)
 	{
 		if(debugEnable)cout << "! Interrupt Creation: " << ProcessCreationMsg(processName) << " @ " << time << endl;
 		while(interrupts.find(ProcessCreationInterrupt(time)) != interrupts.end()) time++;
 		interrupts[ProcessCreationInterrupt(time)] = ProcessCreationMsg(processName);
 	}
 	
-	void diskInterrupt(int time, string pageName)
+	void diskInterrupt(long long time, string pageName)
 	{
 		interrupts[DiskInterrupt(time)] = pageName;
 	}
 	
-	bool handleInterrupts(int time, string currentProcess)
+	bool handleInterrupts(long long time, string currentProcess)
 	{
 		if(debugEnable)cout << "Cycle: " << time << " interrupts " << interrupts.size() << endl;
 		
-		if(interrupts.size() == 0 && faultQueue.size() + readyQueue.size() + blockedQueue.size() == 0) return false;
+		if(interrupts.size() == 0 && faultQueue.size() + readyQueue.size() + blockedQueue.size() + hangedQueue.size() == 0) return false;
 		
 		// handle ProcessCreation first
 		if(interrupts.find(ProcessCreationInterrupt(time)) != interrupts.end()) {
@@ -226,7 +233,7 @@ public:
 					readyQueue.push_back(currentProcess);
 				}
 				
-				int estTimer = time + globalContextSwitch + infoTable[nextProcess].quantumLeft;
+				long long estTimer = time + globalContextSwitch + infoTable[nextProcess].quantumLeft;
 				if(debugEnable)cout<<"quantumLeft:"<<infoTable[nextProcess].quantumLeft<<endl;
 				if(infoTable[nextProcess].quantumLeft == 0) {
 					// this is not expected
@@ -247,7 +254,7 @@ public:
 		return true;
 	}
 	
-	void processTermination(int time, string currentProcess)
+	void processTermination(long long time, string currentProcess)
 	{
 		// revoke currentProcess's timer
 		int estTimer = infoTable[currentProcess].nextTimer;
@@ -255,11 +262,23 @@ public:
 			interrupts.erase(interrupts.find(TimerInterrupt(estTimer)));
 		}
 		
+		// retry hanged process
+		if(hangedQueue.size() != 0) {
+			if(memory->swapPage(time, hangedQueue[0], hangedPage[0])) {
+				// success
+				blockedQueue.insert(hangedQueue[0]);
+				blockedPage[hangedQueue[0]] = hangedPage[0];
+				
+				hangedQueue.pop_front();
+				hangedPage.pop_front();
+			}
+		}
+		
 		// and switch to idle temporarily
 		cpu->notifyContextSwitch(IDLE, time + 1);
 	}
 	
-	void pageFault(int time, string faultingProcess, string faultingPage)
+	void pageFault(long long time, string faultingProcess, string faultingPage)
 	{
 		if(debugEnable)cout << "! " << "Fault starts for " << faultingProcess << "\n";
 		
@@ -301,11 +320,19 @@ public:
 		
 		if(debugEnable)cout << "! " << faultingProcess << " kicked by page fault " << faultingPage << " at " << time << endl;
 		
-		memory->swapPage(time, faultingProcess, faultingPage);
-		blockedQueue.insert(faultingProcess);
+		if(memory->swapPage(time, faultingProcess, faultingPage)) {
+			// memory slot good
+			blockedQueue.insert(faultingProcess);
 		
-		blockedPage[faultingProcess] = faultingPage;
-		cpu->notifyContextSwitch(IDLE, time);
+			blockedPage[faultingProcess] = faultingPage;
+			cpu->notifyContextSwitch(IDLE, time);
+		} else {
+			// memory slot full, hang this process :(
+			hangedQueue.push_back(faultingProcess);
+			
+			hangedPage.push_back(faultingPage);
+			cpu->notifyContextSwitch(IDLE, time);
+		}
 		
 		if(debugEnable)cout << "! " << "pageFault ends\n";
 	}
@@ -318,9 +345,9 @@ class CPU : CPUBase
 	MemoryBase *memory;
 	map<string, ifstream*> fd; // file descripters
 	map<string, string> reverseBuffer;
-	map<string, int> cycleCount, pageFaultCount, terminationTime;
-	int time, currentProcessStartTime;
-	int idleCycles;
+	map<string, long long> cycleCount, pageFaultCount, terminationTime;
+	long long time, currentProcessStartTime;
+	long long idleCycles;
 	string currentProcess, nextMem;
 	
 	bool readBuffer(string processName)
@@ -353,7 +380,7 @@ public:
 		scheduler = s;
 		memory = m;
 	}
-	void notifyContextSwitch(string newProcess, int newProcessStartTime)
+	void notifyContextSwitch(string newProcess, long long newProcessStartTime)
 	{	
 		if(debugEnable)cout << "! " << "Context switch: " << currentProcess << " -> " << newProcess << " to be started at " << newProcessStartTime << endl;
 			
@@ -455,9 +482,9 @@ public:
 		} while(1);
 		cout << "!! Simulation finished at cycle " << time << " with total idle time: " << idleCycles << endl;
 		cout << "!! To conclude:\n";
-		int totalPageFaults = 0;
-		for(map<string,int>::iterator iter = terminationTime.begin(); iter != terminationTime.end(); iter++) {
-			cout << "!! " << iter->first << " terminated at " << iter->second << ", ran " << cycleCount[iter->first] << " cycles with " << pageFaultCount[iter->first] << " page faults.\n";
+		long long totalPageFaults = 0;
+		for(map<string,long long>::iterator iter = terminationTime.begin(); iter != terminationTime.end(); iter++) {
+			cout << "!! " << iter->first << " terminated at " << iter->second << ", ran " << cycleCount[iter->first] << " cycles for " << (iter->second) * 1.0 / globalCyclesPerSec - processStartTime[iter->first] << "s with " << pageFaultCount[iter->first] << " page faults.\n";
 			totalPageFaults += pageFaultCount[iter->first]; 
 		}
 		cout << "!! Total page faults: " << totalPageFaults << endl;
@@ -469,11 +496,11 @@ public:
 class MemoryModel
 {
 public:
-	virtual bool accessPage(int time, string pageName) {ERR}
-	virtual bool insertPage(int availTime, string pageName) {ERR} // always use this after kickOut
+	virtual bool accessPage(long long time, string pageName) {ERR}
+	virtual bool insertPage(long long availTime, string pageName) {ERR} // always use this after kickOut
 	virtual void markBusy(string pageName) {ERR}
 	virtual void unmarkBusy(string pageName) {ERR}
-	virtual bool kickOut(int time) {ERR}
+	virtual bool kickOut(long long time) {ERR}
 	virtual bool memoryFull() {ERR}
 };
 
@@ -481,9 +508,9 @@ class FIFOMemory : MemoryModel
 {
 	deque<string> pages;
 	map<string, bool> pageMarked;
-	map<string, int> pageAvailTime;
+	map<string, long long> pageAvailTime;
 public:
-	bool accessPage(int time, string pageName)
+	bool accessPage(long long time, string pageName)
 	{		
 		if(pageAvailTime.find(pageName) == pageAvailTime.end()) {
 			return false;
@@ -496,7 +523,7 @@ public:
 	{
 		return (pages.size() == globalPages);
 	}
-	bool insertPage(int availTime, string pageName)
+	bool insertPage(long long availTime, string pageName)
 	{
 		pages.push_back(pageName);
 		pageAvailTime[pageName] = availTime;
@@ -511,7 +538,7 @@ public:
 	{
 		pageMarked[pageName] = false;
 	}
-	bool kickOut(int time)
+	bool kickOut(long long time)
 	{
 		if(!this->memoryFull()) return false;
 		deque<string>::iterator iter = pages.begin();
@@ -530,15 +557,15 @@ public:
 	}	
 };
 
-typedef pair<int,string> reverseAccessType;
+typedef pair<long long,string> reverseAccessType;
 #define reverseAccessElement(x,y) make_pair((x),(y))
 class LRUMemory : MemoryModel
 {
 	map<string, bool> pageMarked;
-	map<string, int> pageAvailTime, pageAccessTime;
+	map<string, long long> pageAvailTime, pageAccessTime;
 	set<reverseAccessType> reverseAccess;
 public:
-	bool accessPage(int time, string pageName)
+	bool accessPage(long long time, string pageName)
 	{		
 		if(pageAvailTime.find(pageName) == pageAvailTime.end()) {
 			return false;
@@ -558,7 +585,7 @@ public:
 	{
 		return (reverseAccess.size() == globalPages);
 	}
-	bool insertPage(int availTime, string pageName)
+	bool insertPage(long long availTime, string pageName)
 	{
 		pageAvailTime[pageName] = availTime;
 		pageMarked[pageName] = false;
@@ -574,7 +601,7 @@ public:
 	{
 		pageMarked[pageName] = false;
 	}
-	bool kickOut(int time)
+	bool kickOut(long long time)
 	{
 		if(!this->memoryFull()) return false;
 		set<reverseAccessType>::iterator iter = reverseAccess.begin();
@@ -598,9 +625,9 @@ class SCAMemory : MemoryModel
 {
 	deque<string> pages;
 	map<string, bool> pageMarked, pageRef;
-	map<string, int> pageAvailTime;
+	map<string, long long> pageAvailTime;
 public:
-	bool accessPage(int time, string pageName)
+	bool accessPage(long long time, string pageName)
 	{		
 		if(pageAvailTime.find(pageName) == pageAvailTime.end()) {
 			return false;
@@ -614,7 +641,7 @@ public:
 	{
 		return (pages.size() == globalPages);
 	}
-	bool insertPage(int availTime, string pageName)
+	bool insertPage(long long availTime, string pageName)
 	{
 		pages.push_back(pageName);
 		pageAvailTime[pageName] = availTime;
@@ -630,7 +657,7 @@ public:
 	{
 		pageMarked[pageName] = false;
 	}
-	bool kickOut(int time)
+	bool kickOut(long long time)
 	{
 		if(!this->memoryFull()) return false;
 		deque<string>::iterator iter = pages.begin();
@@ -651,11 +678,11 @@ public:
 
 class Memory : MemoryBase
 {
-	map<string, int> awaitingTime;
+	map<string, long long> awaitingTime;
 	map<string, string> lastFaultProcess;
 	MemoryModel *mmu;
 	SchedulerBase *scheduler;
-	int busyUntil; // should be -1 at first
+	long long busyUntil; // should be -1 at first
 	
 public:
 	void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m, MemoryModel *model)
@@ -667,7 +694,7 @@ public:
 	
 	void debug()
 	{
-		for(map<string,int>::iterator iter = awaitingTime.begin(); iter != awaitingTime.end(); iter++)
+		for(map<string,long long>::iterator iter = awaitingTime.begin(); iter != awaitingTime.end(); iter++)
 			cout << "!! Awaiting page: " << iter->first << " to be available at " << iter->second << endl;
 	}
 	
@@ -675,7 +702,7 @@ public:
 	{
 		awaitingTime.erase(awaitingTime.find(page));
 	}
-	bool fetch(int time, string processName, string pageName)
+	bool fetch(long long time, string processName, string pageName)
 	{
 		if(debugEnable)cout << "Going to fetch " << pageName << "\n";
 		//this->updateAwaitingPages(time);
@@ -689,15 +716,16 @@ public:
 		if(debugEnable)cout << "Done lastFault check\n";
 		return mmu->accessPage(time, pageName);
 	}
-	void swapPage(int time, string faultingProcess, string faultingPage)
+	bool swapPage(long long time, string faultingProcess, string faultingPage)
 	{
 		//this->updateAwaitingPages(time);
 		lastFaultProcess[faultingPage] = faultingProcess;
 		if(awaitingTime.find(faultingPage) != awaitingTime.end()) {
 			// already on a transfer
 			// nothing to do
-		} else {
-			int ETA = max(time, busyUntil) + globalSwap;
+			return true;
+		} else if(awaitingTime.size() < globalPages) {
+			long long ETA = maxLL(time, busyUntil) + globalSwap;
 			awaitingTime[faultingPage] = ETA;
 			
 			busyUntil = ETA;
@@ -707,6 +735,9 @@ public:
 			mmu->markBusy(faultingPage);
 			
 			scheduler->diskInterrupt(ETA, faultingPage);
+			return true;
+		} else {
+			return false; // memory all preserved by previous requests, try again later
 		}
 	}
 };
@@ -732,6 +763,8 @@ int main(int argc, char *argv[])
 	char buffer[255]; double runTime, burstTime, IOTime;
 	while(scanf("%s %lf %lf %lf", buffer, &runTime, &burstTime, &IOTime) != EOF) {
 		myScheduler->creationInterrupt(runTime * globalCyclesPerSec, buffer);
+		string process = buffer;
+		processStartTime[buffer] = runTime;
 	}
 	
 	myCPU->simulate();
