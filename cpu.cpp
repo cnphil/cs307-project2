@@ -682,13 +682,14 @@ class Memory : MemoryBase
 	map<string, string> lastFaultProcess;
 	MemoryModel *mmu;
 	SchedulerBase *scheduler;
-	long long busyUntil; // should be -1 at first
+	long long busyUntil, busyCount; // should be -1 at first
 	
 public:
 	void initialize(SchedulerBase *s, CPUBase *c, MemoryBase *m, MemoryModel *model)
 	{
 		scheduler = s;
 		busyUntil = -1;
+		busyCount = 0;
 		mmu = model;
 	}
 	
@@ -710,6 +711,7 @@ public:
 		if(lastFaultProcess.find(pageName) != lastFaultProcess.end()) {
 			if(lastFaultProcess[pageName] == processName) {
 				mmu->unmarkBusy(pageName);
+				busyCount--;
 				lastFaultProcess.erase(lastFaultProcess.find(pageName));
 			}
 		}
@@ -724,7 +726,7 @@ public:
 			// already on a transfer
 			// nothing to do
 			return true;
-		} else if(awaitingTime.size() < globalPages) {
+		} else if(busyCount < globalPages) {
 			long long ETA = maxLL(time, busyUntil) + globalSwap;
 			awaitingTime[faultingPage] = ETA;
 			
@@ -733,6 +735,7 @@ public:
 			mmu->kickOut(time);
 			mmu->insertPage(ETA, faultingPage);
 			mmu->markBusy(faultingPage);
+			busyCount++;
 			
 			scheduler->diskInterrupt(ETA, faultingPage);
 			return true;
